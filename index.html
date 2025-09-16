@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="de">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Diskreter Matheknecht – Resolutionsrechner</title>
+    <style>
+         :root {
+            --bg: #0f172a;
+            --card: #111827;
+            --ink: #e5e7eb;
+            --muted: #94a3b8;
+            --accent: #22d3ee;
+            --ok: #34d399;
+            --bad: #f87171
+        }
+        
+        body {
+            margin: 0;
+            background: linear-gradient(180deg, #0b1220, #0f172a);
+            color: var(--ink);
+            font: 16px/1.5 system-ui, Segoe UI, Roboto, Helvetica, Arial
+        }
+        
+        .wrap {
+            max-width: 1080px;
+            margin: auto;
+            padding: 24px
+        }
+        
+        h1 {
+            font-size: clamp(20px, 2.5vw, 28px);
+            margin: 0
+        }
+        
+        .card {
+            background: var(--card);
+            border: 1px solid #1f2937;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+            padding: 18px
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            background: #0b1020;
+            color: var(--ink);
+            border: 1px solid #233047;
+            border-radius: 12px;
+            padding: 12px 14px;
+            font: 600 15px ui-monospace, monospace
+        }
+        
+        .row {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 12px
+        }
+        
+        button {
+            border: 0;
+            background: linear-gradient(90deg, #22d3ee, #3b82f6);
+            color: #0b1020;
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-weight: 800;
+            cursor: pointer
+        }
+        
+        .pill {
+            display: inline-block;
+            padding: .1rem .5rem;
+            border-radius: 999px;
+            border: 1px solid #1f2d46;
+            background: #0b1020;
+            margin: .1rem .2rem
+        }
+        
+        .success {
+            color: var(--ok)
+        }
+        
+        .danger {
+            color: var(--bad)
+        }
+        
+        svg {
+            width: 100%;
+            height: 600px;
+            background: #0b1020;
+            border: 1px solid #1f2d46;
+            border-radius: 12px
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrap">
+        <h1>🧠 Diskreter Matheknecht – Resolutionsrechner</h1>
+
+        <div class="card grid">
+            <p class="muted">Operatoren: <code>¬ ~ !</code> Negation, <code>∧ &amp; /\</code> Und, <code>∨ | \/</code> Oder, <code>→ -&gt; =&gt;</code> Implikation, <code>↔ &lt;-&gt;</code> Äquivalenz, Klammern <code>( )</code>.</p>
+            <div class="row">
+                <input id="input" type="text" value="(((~a \/ ~b) /\\ (a \/ b \/ c) /\\ (c \/ ~a) /\\ (~c \/ e)) -> ((b /\\ ~d) \/ e))" aria-label="Formel" />
+                <button id="go">Beweisen</button>
+            </div>
+        </div>
+
+        <section class="card grid">
+            <h2>Resolutionsgraph</h2>
+            <svg id="graph" viewBox="0 0 1200 800"></svg>
+        </section>
+
+        <section class="card grid">
+            <h2>Erklärte Ausgabe</h2>
+            <div id="explain"></div>
+            <div id="consequence"></div>
+        </section>
+    </div>
+
+    <script>
+        /****************** Parser & KNF ******************/
+        function tokenize(s) {
+            s = s.replaceAll("/\\", "∧").replaceAll("\\/", "∨").replaceAll("->", "→").replaceAll("=>", "→").replaceAll("<->", "↔");
+            const tokens = [];
+            let i = 0;
+            s = s.replace(/\s+/g, "");
+            while (i < s.length) {
+                const c = s[i];
+                if (/[a-zA-Z][a-zA-Z0-9_]*/.test(c)) {
+                    const m = s.slice(i).match(/^[a-zA-Z][a-zA-Z0-9_]*/)[0];
+                    tokens.push({
+                        t: "VAR",
+                        v: m
+                    });
+                    i += m.length;
+                    continue;
+                }
+                if (c === '(' || c === ')') {
+                    tokens.push({
+                        t: c === '(' ? 'LP' : 'RP',
+                        v: c
+                    });
+                    i++;
+                    continue;
+                }
+                if (c === '¬' || c === '!' || c === '~') {
+                    tokens.push({
+                        t: "NOT",
+                        v: c
+                    });
+                    i++;
+                    continue;
+                }
+                if (c === '∧' || c === '∨') {
+                    tokens.push({
+                        t: c === '∧' ? "AND" : "OR",
+                        v: c
+                    });
+                    i++;
+                    continue;
+                }
+                if (c === '→') {
+                    tokens.push({
+                        t: "IMP",
+                        v: c
+                    });
+                    i++;
+                    continue;
+                }
+                if (c === '↔') {
+                    tokens.push({
+                        t: "IFF",
+                        v: c
+                    });
+                    i++;
+                    continue;
+                }
+                throw new Error("Unbekanntes Zeichen an Position " + i + ": " + c);
+            }
+            return tokens;
+        }
+
+        function parse(tokens) {
+            let i = 0;
+
+            function peek() {
+                return tokens[i] || {
+                    t: "EOF"
+                };
+            }
+
+            function consume(t) {
+                if (peek().t === t) {
+                    return tokens[i++];
+                }
+                throw new Error("Erwartet " + t + ", gefunden " + peek().t);
+            }
+            const bp = {
+                "IFF": 10,
+                "IMP": 20,
+                "OR": 30,
+                "AND": 40
+            };
+
+            function nud(tok) {
+                if (tok.t === "VAR") return {
+                    k: "var",
+                    name: tok.v
+                };
+                if (tok.t === "NOT") return {
+                    k: "not",
+                    x: led(null, 999)
+                };
+                if (tok.t === "LP") {
+                    const e = led(null, 0);
+                    consume("RP");
+                    return e;
+                }
+                throw new Error("Unerwartetes Token " + tok.t);
+            }
+
+            function led(left, minbp) {
+                let leftNode = left === null ? nud(consume(peek().t)) : left;
+                while (true) {
+                    const t = peek();
+                    const lbp = bp[t.t];
+                    if (lbp === undefined || lbp <= minbp) break;
+                    i++;
+                    const right = led(null, lbp);
+                    const kind = t.t === "AND" ? "and" : t.t === "OR" ? "or" : t.t === "IMP" ? "imp" : "iff";
+                    leftNode = {
+                        k: kind,
+                        a: leftNode,
+                        b: right
+                    };
+                }
+                return leftNode;
+            }
+            const ast = led(null, 0);
+            if (peek().t !== 'EOF') throw new Error('Rest hinter der Formel: ' + JSON.stringify(tokens.slice(i)));
+            return ast;
+        }
+
+        function elimImps(ast) {
+            switch (ast.k) {
+                case 'var':
+                    return ast;
+                case 'not':
+                    return {
+                        k: 'not',
+                        x: elimImps(ast.x)
+                    };
+                case 'imp':
+                    return {
+                        k: 'or',
+                        a: {
+                            k: 'not',
+                            x: elimImps(ast.a)
+                        },
+                        b: elimImps(ast.b)
+                    };
+                case 'iff':
+                    return {
+                        k: 'and',
+                        a: elimImps({
+                            k: 'imp',
+                            a: ast.a,
+                            b: ast.b
+                        }),
+                        b: elimImps({
+                            k: 'imp',
+                            a: ast.b,
+                            b: ast.a
+                        })
+                    };
+                case 'and':
+                    return {
+                        k: 'and',
+                        a: elimImps(ast.a),
+                        b: elimImps(ast.b)
+                    };
+                case 'or':
+                    return {
+                        k: 'or',
+                        a: elimImps(ast.a),
+                        b: elimImps(ast.b)
+                    };
+            }
+        }
+
+        function nnf(ast) {
+            switch (ast.k) {
+                case 'var':
+                    return ast;
+                case 'and':
+                    return {
+                        k: 'and',
+                        a: nnf(ast.a),
+                        b: nnf(ast.b)
+                    };
+                case 'or':
+                    return {
+                        k: 'or',
+                        a: nnf(ast.a),
+                        b: nnf(ast.b)
+                    };
+                case 'not':
+                    const x = ast.x;
+                    if (x.k === 'var') return ast;
+                    if (x.k === 'not') return nnf(x.x);
+                    if (x.k === 'and') return {
+                        k: 'or',
+                        a: nnf({
+                            k: 'not',
+                            x: x.a
+                        }),
+                        b: nnf({
+                            k: 'not',
+                            x: x.b
+                        })
+                    };
+                    if (x.k === 'or') return {
+                        k: 'and',
+                        a: nnf({
+                            k: 'not',
+                            x: x.a
+                        }),
+                        b: nnf({
+                            k: 'not',
+                            x: x.b
+                        })
+                    };
+            }
+        }
+
+        function distribute(a, b) {
+            if (a.k === 'and') return {
+                k: 'and',
+                a: distribute(a.a, b),
+                b: distribute(a.b, b)
+            };
+            if (b.k === 'and') return {
+                k: 'and',
+                a: distribute(a, b.a),
+                b: distribute(a, b.b)
+            };
+            return {
+                k: 'or',
+                a,
+                b
+            };
+        }
+
+        function toCNFAST(ast) {
+            switch (ast.k) {
+                case 'var':
+                case 'not':
+                    return ast;
+                case 'and':
+                    return {
+                        k: 'and',
+                        a: toCNFAST(ast.a),
+                        b: toCNFAST(ast.b)
+                    };
+                case 'or':
+                    return distribute(toCNFAST(ast.a), toCNFAST(ast.b));
+            }
+        }
+
+        function cnfToClauses(ast) {
+            function gather(e) {
+                if (e.k === 'and') return [...gather(e.a), ...gather(e.b)];
+                return [gatherDisj(e)];
+            }
+
+            function gatherDisj(e) {
+                if (e.k === 'or') return [...gatherDisj(e.a), ...gatherDisj(e.b)];
+                if (e.k === 'var') return new Set([e.name]);
+                if (e.k === 'not' && e.x.k === 'var') return new Set(['~' + e.x.name]);
+                throw new Error('Nicht-literal in Disjunktion');
+            }
+            const raw = gather(ast).map(s => new Set([...s]));
+            const simp = [];
+            for (const C of raw) {
+                let taut = false;
+                const lits = [...C];
+                const set = new Set(C);
+                for (const lit of lits) {
+                    if (set.has(lit.startsWith('~') ? lit.slice(1) : '~' + lit)) {
+                        taut = true;
+                        break;
+                    }
+                }
+                if (!taut) {
+                    simp.push(new Set(lits.sort()));
+                }
+            }
+            return simp;
+        }
+
+        function prettyClause(C) {
+            return C.size ? [...C].join(' ∨ ').replace(/~/g, '¬') : '□';
+        }
+
+        function prettySet(S) {
+            return '{ ' + S.map(C => '(' + prettyClause(C) + ')').join(' ∧ ') + ' }';
+        }
+
+        /****************** Resolution – BFS ******************/
+        function resolveClauses(clauses) {
+            let id = 0;
+            const nodeId = new Map();
+            const nodes = [];
+            const edges = [];
+            const keyOf = C => [...C].sort().join('||');
+
+            function ensureNode(C, base) {
+                const k = keyOf(C);
+                if (!nodeId.has(k)) {
+                    nodeId.set(k, ++id);
+                    nodes.push({
+                        id,
+                        C: new Set(C),
+                        label: prettyClause(C),
+                        base
+                    });
+                }
+                return nodeId.get(k);
+            }
+            clauses.forEach(C => ensureNode(C, true));
+
+            const work = [...clauses.map(C => new Set(C))];
+
+            function resolvents(A, B) {
+                const res = [];
+                for (const lit of A) {
+                    const comp = lit.startsWith('~') ? lit.slice(1) : ('~' + lit);
+                    if (B.has(comp)) {
+                        const R = new Set([...A, ...B]);
+                        R.delete(lit);
+                        R.delete(comp);
+                        res.push(R);
+                    }
+                }
+                return res;
+            }
+            const queue = [];
+            for (let i = 0; i < work.length; i++)
+                for (let j = i + 1; j < work.length; j++) queue.push([work[i], work[j]]);
+            const seen = new Set(work.map(C => keyOf(C)));
+            while (queue.length) {
+                const [A, B] = queue.shift();
+                for (const R of resolvents(A, B)) {
+                    const idA = ensureNode(A, false),
+                        idB = ensureNode(B, false),
+                        idR = ensureNode(R, false);
+                    edges.push({
+                        from: idA,
+                        to: idR
+                    });
+                    edges.push({
+                        from: idB,
+                        to: idR
+                    });
+                    const kR = keyOf(R);
+                    if (!seen.has(kR)) {
+                        seen.add(kR);
+                        work.push(R);
+                        for (const C of work) {
+                            if (C !== R) queue.push([C, R]);
+                        }
+                    }
+                    if (R.size === 0) {
+                        return {
+                            nodes,
+                            edges,
+                            emptyId: idR
+                        };
+                    }
+                }
+            }
+            return {
+                nodes,
+                edges,
+                emptyId: null
+            };
+        }
+
+        /****************** Layout wie im Heft ******************/
+        function layoutGraph(svg, nodes, edges) {
+            svg.innerHTML = '';
+            const incoming = new Map(nodes.map(n => [n.id, []]));
+            edges.forEach(e => incoming.get(e.to).push(e.from));
+            const level = new Map();
+            nodes.forEach(n => {
+                if (n.base) level.set(n.id, 0);
+            });
+            let changed = true,
+                guard = 0;
+            while (changed && guard++ < 50) {
+                changed = false;
+                for (const n of nodes) {
+                    const ps = incoming.get(n.id) || [];
+                    const lv = ps.length ? Math.max(...ps.map(p => (level.get(p) || 0) + 1)) : (level.get(n.id) || 0);
+                    if (level.get(n.id) !== lv) {
+                        level.set(n.id, lv);
+                        changed = true;
+                    }
+                }
+            }
+            const byLevel = {};
+            nodes.forEach(n => {
+                const l = level.get(n.id) || 0;
+                (byLevel[l] || (byLevel[l] = [])).push(n);
+            });
+            const width = +svg.getAttribute('viewBox').split(' ')[2];
+            const height = +svg.getAttribute('viewBox').split(' ')[3];
+            const maxL = Math.max(...Object.keys(byLevel).map(Number));
+            const layerH = Math.max(80, height / Math.max(1, maxL + 1));
+            const pos = new Map(),
+                size = new Map();
+            for (const l of Object.keys(byLevel)) {
+                const arr = byLevel[l];
+                const wts = arr.map(n => Math.max(60, n.label.length * 8 + 24));
+                const total = wts.reduce((a, b) => a + b, 0);
+                const gap = Math.max(40, (width - total) / (arr.length + 1));
+                let x = gap;
+                const y = 40 + Number(l) * layerH;
+                arr.forEach((n, idx) => {
+                    const w = wts[idx];
+                    pos.set(n.id, {
+                        x: x + w / 2,
+                        y
+                    });
+                    size.set(n.id, {
+                        w,
+                        h: 30
+                    });
+                    x += w + gap;
+                });
+            }
+            // Kanten: senkrecht/waagerecht/ senkrecht
+            for (const e of edges) {
+                const a = pos.get(e.from),
+                    b = pos.get(e.to);
+                const aw = size.get(e.from).h / 2,
+                    bw = size.get(e.to).h / 2;
+                const midY = (a.y + b.y) / 2;
+                const path = `M ${a.x} ${a.y+aw} L ${a.x} ${midY} L ${b.x} ${midY} L ${b.x} ${b.y-bw}`;
+                const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                p.setAttribute('d', path);
+                p.setAttribute('fill', 'none');
+                p.setAttribute('stroke', '#6b88b6');
+                p.setAttribute('stroke-width', '1.6');
+                svg.appendChild(p);
+            }
+            // Knoten
+            for (const n of nodes) {
+                const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                const p = pos.get(n.id);
+                const s = size.get(n.id);
+                const w = s.w,
+                    h = s.h;
+                const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                r.setAttribute('x', p.x - w / 2);
+                r.setAttribute('y', p.y - h / 2);
+                r.setAttribute('width', w);
+                r.setAttribute('height', h);
+                r.setAttribute('rx', 10);
+                r.setAttribute('ry', 10);
+                r.setAttribute('fill', '#0b1020');
+                let stroke = n.base ? '#1f2d46' : '#2b8a3e';
+                if (n.label === '□') stroke = '#f87171';
+                r.setAttribute('stroke', stroke);
+                r.setAttribute('stroke-width', '1.8');
+                const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                t.setAttribute('x', p.x);
+                t.setAttribute('y', p.y + 4);
+                t.setAttribute('text-anchor', 'middle');
+                t.setAttribute('font-size', '13');
+                t.setAttribute('fill', '#e5e7eb');
+                t.textContent = n.label;
+                g.appendChild(r);
+                g.appendChild(t);
+                svg.appendChild(g);
+            }
+        }
+
+        /****************** UI glue ******************/
+        function explainStep(container, title, content) {
+            const sec = document.createElement('div');
+            sec.innerHTML = `<h3 style="margin:.2rem 0 0">${title}</h3><div class="muted">${content}</div>`;
+            container.appendChild(sec);
+        }
+
+        function pretty(e) {
+            switch (e.k) {
+                case 'var':
+                    return e.name;
+                case 'not':
+                    return `¬${pretty(e.x)}`;
+                case 'and':
+                    return `(${pretty(e.a)} ∧ ${pretty(e.b)})`;
+                case 'or':
+                    return `(${pretty(e.a)} ∨ ${pretty(e.b)})`;
+                case 'imp':
+                    return `(${pretty(e.a)} → ${pretty(e.b)})`;
+                case 'iff':
+                    return `(${pretty(e.a)} ↔ ${pretty(e.b)})`;
+                default:
+                    return '?';
+            }
+        }
+
+        function run() {
+            const input = document.getElementById('input').value;
+            const out = document.getElementById('explain');
+            out.innerHTML = '';
+            const svg = document.getElementById('graph');
+            try {
+                const tokens = tokenize(input);
+                explainStep(out, 'Eingegebene Formel', `<code>${input}</code>`);
+                let ast = parse(tokens);
+
+                // Prüfe, ob die Eingabe eine Implikation ist
+                if (ast.k === 'imp') {
+                    ast = {
+                        k: 'and',
+                        a: ast.a,
+                        b: {
+                            k: 'not',
+                            x: ast.b
+                        }
+                    };
+                    explainStep(out, 'Negation der Implikation', `<code>¬(E → F) ≡ (E ∧ ¬F)</code><br><code>${pretty(ast)}</code>`);
+                }
+
+                const noImp = elimImps(ast);
+                explainStep(out, '1) Imp-/Äquiv-Eliminierung', `<code>${pretty(noImp)}</code>`);
+                const n = nnf(noImp);
+                explainStep(out, '2) Negationen nach innen (NNF)', `<code>${pretty(n)}</code>`);
+                const cnf = toCNFAST(n);
+                explainStep(out, '3) Konjunktive Normalform', `<code>${pretty(cnf)}</code>`);
+                const clauses = cnfToClauses(cnf);
+                explainStep(out, '4) Klauselmenge', `<div>${clauses.map(C=>`<span class="pill">${prettyClause(C)}</span>`).join('')}</div><div class="muted">${prettySet(clauses)}</div>`);
+                const {nodes,edges,emptyId}=resolveClauses(clauses);
+                layoutGraph(svg,nodes,edges);
+                const cons=document.getElementById('consequence'); cons.innerHTML='';
+                cons.innerHTML = emptyId? `<p class="success"><b>Erfolg:</b> Leere Klausel □ gefunden. Unerfüllbar ⇒ Widerspruchsbeweis abgeschlossen.</p>`: `<p class="danger"><b>Keine leere Klausel.</b></p>`;
+            }catch(e){
+                document.getElementById('explain').innerHTML = `<div class="danger"><b>Eingabefehler:</b> ${e.message}</div>`;
+                document.getElementById('graph').innerHTML='';
+            }
+        }
+
+document.getElementById('go').addEventListener('click', run);
+window.addEventListener('load', run);
+    </script>
+</body>
+
+</html>
