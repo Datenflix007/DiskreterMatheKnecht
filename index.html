@@ -410,7 +410,6 @@
         }
 
         function resolveClauses(clauses) {
-            // Initiale Knoten für die Eingabeklauseln
             let nodes = clauses.map((C, i) => ({
                 id: 'C' + i,
                 label: prettyClause(C),
@@ -419,8 +418,9 @@
             }));
             let edges = [];
             let idCounter = clauses.length;
-            let derived = new Map(nodes.map(n => [n.label, n.id]));
-            let queue = [...nodes];
+            let derived = new Map(nodes.map(n => [JSON.stringify([...n.clause].sort()), n.id]));
+            let allClauses = clauses.map(C => new Set(C));
+            let known = new Set(allClauses.map(c => JSON.stringify([...c].sort())));
             let foundEmpty = null;
 
             // Hilfsfunktion: Resolution zweier Klauseln
@@ -429,7 +429,6 @@
                 for (const l1 of C1) {
                     const l2 = l1.startsWith('~') ? l1.slice(1) : '~' + l1;
                     if (C2.has(l2)) {
-                        // Vereinigung ohne l1 und l2
                         const newSet = new Set([...C1, ...C2]);
                         newSet.delete(l1);
                         newSet.delete(l2);
@@ -439,56 +438,58 @@
                 return resolvents;
             }
 
-            // Hauptloop: Resolution anwenden
-            let pairsChecked = new Set();
-            while (queue.length > 0 && !foundEmpty) {
-                const current = queue.shift();
-                for (const other of nodes) {
-                    // Paar eindeutig machen
-                    const key = [current.id, other.id].sort().join('-');
-                    if (current.id === other.id || pairsChecked.has(key)) continue;
-                    pairsChecked.add(key);
+            // Dynamische Paarbildung
+            let queue = [];
+            for (let i = 0; i < allClauses.length; i++) {
+                for (let j = i + 1; j < allClauses.length; j++) {
+                    queue.push([i, j]);
+                }
+            }
 
-                    const newClauses = resolve(current.clause, other.clause);
-                    for (const nc of newClauses) {
-                        // Tautologien überspringen
-                        let taut = false;
-                        for (const lit of nc) {
-                            if (nc.has(lit.startsWith('~') ? lit.slice(1) : '~' + lit)) {
-                                taut = true;
-                                break;
-                            }
-                        }
-                        if (taut) continue;
-
-                        const label = prettyClause(nc);
-                        if (derived.has(label)) continue; // Schon vorhanden
-
-                        const nid = 'C' + idCounter++;
-                        const node = {
-                            id: nid,
-                            label,
-                            base: false,
-                            clause: nc
-                        };
-                        nodes.push(node);
-                        queue.push(node);
-                        derived.set(label, nid);
-                        edges.push({
-                            from: current.id,
-                            to: nid
-                        });
-                        edges.push({
-                            from: other.id,
-                            to: nid
-                        });
-
-                        if (nc.size === 0) {
-                            foundEmpty = nid;
+            while (queue.length && !foundEmpty) {
+                const [i, j] = queue.shift();
+                const C1 = allClauses[i],
+                    C2 = allClauses[j];
+                const resolvents = resolve(C1, C2);
+                for (const nc of resolvents) {
+                    // Tautologien überspringen
+                    let taut = false;
+                    for (const lit of nc) {
+                        if (nc.has(lit.startsWith('~') ? lit.slice(1) : '~' + lit)) {
+                            taut = true;
                             break;
                         }
                     }
-                    if (foundEmpty) break;
+                    if (taut) continue;
+                    const key = JSON.stringify([...nc].sort());
+                    if (known.has(key)) continue;
+                    known.add(key);
+                    allClauses.push(nc);
+                    const nid = 'C' + idCounter++;
+                    derived.set(key, nid);
+                    const node = {
+                        id: nid,
+                        label: prettyClause(nc),
+                        base: false,
+                        clause: nc
+                    };
+                    nodes.push(node);
+                    edges.push({
+                        from: derived.get(JSON.stringify([...C1].sort())),
+                        to: nid
+                    });
+                    edges.push({
+                        from: derived.get(JSON.stringify([...C2].sort())),
+                        to: nid
+                    });
+                    // Neue Paare mit allen bisherigen Klauseln bilden
+                    for (let k = 0; k < allClauses.length - 1; k++) {
+                        queue.push([k, allClauses.length - 1]);
+                    }
+                    if (nc.size === 0) {
+                        foundEmpty = nid;
+                        break;
+                    }
                 }
             }
 
@@ -656,18 +657,12 @@
                 explainStep(out, 'Eingegebene Formel', `<code>${input}</code>`);
                 let ast = parse(tokens);
 
-                // Prüfe, ob die Eingabe eine Implikation ist
-                if (ast.k === 'imp') {
-                    ast = {
-                        k: 'and',
-                        a: ast.a,
-                        b: {
-                            k: 'not',
-                            x: ast.b
-                        }
-                    };
-                    explainStep(out, 'Negation der Implikation', `<code>¬(E → F) ≡ (E ∧ ¬F)</code><br><code>${pretty(ast)}</code>`);
-                }
+                // Automatisch Negation für Widerspruchsbeweis
+                ast = {
+                    k: 'not',
+                    x: ast
+                };
+                explainStep(out, 'Negation für Widerspruchsbeweis', `<code>¬(${pretty(ast.x)})</code>`);
 
                 const noImp = elimImps(ast);
                 explainStep(out, '1) Imp-/Äquiv-Eliminierung', `<code>${pretty(noImp)}</code>`);
