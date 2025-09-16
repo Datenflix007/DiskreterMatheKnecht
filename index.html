@@ -102,13 +102,14 @@
         <div class="card grid">
             <p class="muted">Operatoren: <code>¬ ~ !</code> Negation, <code>∧ &amp; /\</code> Und, <code>∨ | \/</code> Oder, <code>→ -&gt; =&gt;</code> Implikation, <code>↔ &lt;-&gt;</code> Äquivalenz, Klammern <code>( )</code>.</p>
             <div class="row">
-                <input id="input" type="text" value="(((~a \/ ~b) /\\ (a \/ b \/ c) /\\ (c \/ ~a) /\\ (~c \/ e)) -> ((b /\\ ~d) \/ e))" aria-label="Formel" />
+                <input id="input" type="text" value="(((a \/ b) /\ (~a \/ c)) -> (b \/ c))" aria-label="Formel" />
                 <button id="go">Beweisen</button>
             </div>
         </div>
 
         <section class="card grid">
             <h2>Resolutionsgraph</h2>
+            <button id="downloadSvg" style="margin-bottom:10px;">Graph als Bild herunterladen</button>
             <svg id="graph" viewBox="0 0 1200 800"></svg>
         </section>
 
@@ -401,94 +402,103 @@
         }
 
         function prettyClause(C) {
-            return C.size ? [...C].join(' ∨ ').replace(/~/g, '¬') : '□';
+            return `{ ${C.size ? [...C].join(' ∨ ').replace(/~/g, '¬') : '□'} }`;
         }
 
-        function prettySet(S) {
-            return '{ ' + S.map(C => '(' + prettyClause(C) + ')').join(' ∧ ') + ' }';
+        function prettySet(clauses) {
+            return clauses.map(C => `{ ${C.size ? [...C].join(' ∨ ').replace(/~/g, '¬') : '□'} }`).join(', ');
         }
 
-        /****************** Resolution – BFS ******************/
         function resolveClauses(clauses) {
-            let id = 0;
-            const nodeId = new Map();
-            const nodes = [];
-            const edges = [];
-            const keyOf = C => [...C].sort().join('||');
+            // Initiale Knoten für die Eingabeklauseln
+            let nodes = clauses.map((C, i) => ({
+                id: 'C' + i,
+                label: prettyClause(C),
+                base: true,
+                clause: C
+            }));
+            let edges = [];
+            let idCounter = clauses.length;
+            let derived = new Map(nodes.map(n => [n.label, n.id]));
+            let queue = [...nodes];
+            let foundEmpty = null;
 
-            function ensureNode(C, base) {
-                const k = keyOf(C);
-                if (!nodeId.has(k)) {
-                    nodeId.set(k, ++id);
-                    nodes.push({
-                        id,
-                        C: new Set(C),
-                        label: prettyClause(C),
-                        base
-                    });
-                }
-                return nodeId.get(k);
-            }
-            clauses.forEach(C => ensureNode(C, true));
-
-            const work = [...clauses.map(C => new Set(C))];
-
-            function resolvents(A, B) {
-                const res = [];
-                for (const lit of A) {
-                    const comp = lit.startsWith('~') ? lit.slice(1) : ('~' + lit);
-                    if (B.has(comp)) {
-                        const R = new Set([...A, ...B]);
-                        R.delete(lit);
-                        R.delete(comp);
-                        res.push(R);
+            // Hilfsfunktion: Resolution zweier Klauseln
+            function resolve(C1, C2) {
+                const resolvents = [];
+                for (const l1 of C1) {
+                    const l2 = l1.startsWith('~') ? l1.slice(1) : '~' + l1;
+                    if (C2.has(l2)) {
+                        // Vereinigung ohne l1 und l2
+                        const newSet = new Set([...C1, ...C2]);
+                        newSet.delete(l1);
+                        newSet.delete(l2);
+                        resolvents.push(newSet);
                     }
                 }
-                return res;
+                return resolvents;
             }
-            const queue = [];
-            for (let i = 0; i < work.length; i++)
-                for (let j = i + 1; j < work.length; j++) queue.push([work[i], work[j]]);
-            const seen = new Set(work.map(C => keyOf(C)));
-            while (queue.length) {
-                const [A, B] = queue.shift();
-                for (const R of resolvents(A, B)) {
-                    const idA = ensureNode(A, false),
-                        idB = ensureNode(B, false),
-                        idR = ensureNode(R, false);
-                    edges.push({
-                        from: idA,
-                        to: idR
-                    });
-                    edges.push({
-                        from: idB,
-                        to: idR
-                    });
-                    const kR = keyOf(R);
-                    if (!seen.has(kR)) {
-                        seen.add(kR);
-                        work.push(R);
-                        for (const C of work) {
-                            if (C !== R) queue.push([C, R]);
+
+            // Hauptloop: Resolution anwenden
+            let pairsChecked = new Set();
+            while (queue.length > 0 && !foundEmpty) {
+                const current = queue.shift();
+                for (const other of nodes) {
+                    // Paar eindeutig machen
+                    const key = [current.id, other.id].sort().join('-');
+                    if (current.id === other.id || pairsChecked.has(key)) continue;
+                    pairsChecked.add(key);
+
+                    const newClauses = resolve(current.clause, other.clause);
+                    for (const nc of newClauses) {
+                        // Tautologien überspringen
+                        let taut = false;
+                        for (const lit of nc) {
+                            if (nc.has(lit.startsWith('~') ? lit.slice(1) : '~' + lit)) {
+                                taut = true;
+                                break;
+                            }
+                        }
+                        if (taut) continue;
+
+                        const label = prettyClause(nc);
+                        if (derived.has(label)) continue; // Schon vorhanden
+
+                        const nid = 'C' + idCounter++;
+                        const node = {
+                            id: nid,
+                            label,
+                            base: false,
+                            clause: nc
+                        };
+                        nodes.push(node);
+                        queue.push(node);
+                        derived.set(label, nid);
+                        edges.push({
+                            from: current.id,
+                            to: nid
+                        });
+                        edges.push({
+                            from: other.id,
+                            to: nid
+                        });
+
+                        if (nc.size === 0) {
+                            foundEmpty = nid;
+                            break;
                         }
                     }
-                    if (R.size === 0) {
-                        return {
-                            nodes,
-                            edges,
-                            emptyId: idR
-                        };
-                    }
+                    if (foundEmpty) break;
                 }
             }
+
             return {
                 nodes,
                 edges,
-                emptyId: null
+                emptyId: foundEmpty
             };
         }
-
-        /****************** Layout wie im Heft ******************/
+        // Graph-Layout mit diagonalen Kanten
         function layoutGraph(svg, nodes, edges) {
             svg.innerHTML = '';
             const incoming = new Map(nodes.map(n => [n.id, []]));
@@ -523,37 +533,41 @@
                 size = new Map();
             for (const l of Object.keys(byLevel)) {
                 const arr = byLevel[l];
-                const wts = arr.map(n => Math.max(60, n.label.length * 8 + 24));
+                const wts = arr.map(n => Math.max(80, n.label.length * 10 + 40));
                 const total = wts.reduce((a, b) => a + b, 0);
                 const gap = Math.max(40, (width - total) / (arr.length + 1));
                 let x = gap;
                 const y = 40 + Number(l) * layerH;
                 arr.forEach((n, idx) => {
-                    const w = wts[idx];
+                    const w = wts[idx],
+                        h = 40;
                     pos.set(n.id, {
                         x: x + w / 2,
                         y
                     });
                     size.set(n.id, {
                         w,
-                        h: 30
+                        h
                     });
                     x += w + gap;
                 });
             }
-            // Kanten: senkrecht/waagerecht/ senkrecht
+            // Diagonale Kanten
             for (const e of edges) {
                 const a = pos.get(e.from),
                     b = pos.get(e.to);
-                const aw = size.get(e.from).h / 2,
-                    bw = size.get(e.to).h / 2;
-                const midY = (a.y + b.y) / 2;
-                const path = `M ${a.x} ${a.y+aw} L ${a.x} ${midY} L ${b.x} ${midY} L ${b.x} ${b.y-bw}`;
+                const sa = size.get(e.from),
+                    sb = size.get(e.to);
+                const startX = a.x,
+                    startY = a.y + sa.h / 2;
+                const endX = b.x,
+                    endY = b.y - sb.h / 2;
+                const path = `M ${startX} ${startY} L ${endX} ${endY}`;
                 const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 p.setAttribute('d', path);
                 p.setAttribute('fill', 'none');
                 p.setAttribute('stroke', '#6b88b6');
-                p.setAttribute('stroke-width', '1.6');
+                p.setAttribute('stroke-width', '2');
                 svg.appendChild(p);
             }
             // Knoten
@@ -572,14 +586,14 @@
                 r.setAttribute('ry', 10);
                 r.setAttribute('fill', '#0b1020');
                 let stroke = n.base ? '#1f2d46' : '#2b8a3e';
-                if (n.label === '□') stroke = '#f87171';
+                if (n.label.includes('□')) stroke = '#f87171';
                 r.setAttribute('stroke', stroke);
-                r.setAttribute('stroke-width', '1.8');
+                r.setAttribute('stroke-width', '2');
                 const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
                 t.setAttribute('x', p.x);
-                t.setAttribute('y', p.y + 4);
+                t.setAttribute('y', p.y + 6);
                 t.setAttribute('text-anchor', 'middle');
-                t.setAttribute('font-size', '13');
+                t.setAttribute('font-size', '16');
                 t.setAttribute('fill', '#e5e7eb');
                 t.textContent = n.label;
                 g.appendChild(r);
@@ -587,6 +601,24 @@
                 svg.appendChild(g);
             }
         }
+
+        // Download SVG als Bild
+        document.getElementById('downloadSvg').addEventListener('click', function() {
+            const svg = document.getElementById('graph');
+            const serializer = new XMLSerializer();
+            const source = serializer.serializeToString(svg);
+            const blob = new Blob([source], {
+                type: 'image/svg+xml;charset=utf-8'
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'resolutionsgraph.svg';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        });
 
         /****************** UI glue ******************/
         function explainStep(container, title, content) {
